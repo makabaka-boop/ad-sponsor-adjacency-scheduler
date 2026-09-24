@@ -14,8 +14,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .schemas import Batch, ERR_DUPLICATE_ID, ERR_TOO_MANY_WINDOWS
-from .solver import solve
+from .schemas import (
+    AdvertiserBatch,
+    Batch,
+    ERR_DUPLICATE_ID,
+    ERR_TOO_MANY_ADVERTISERS,
+    ERR_TOO_MANY_WINDOWS,
+)
+from .solver import solve, solve_with_advertisers
 
 logger = logging.getLogger("scheduling")
 
@@ -23,6 +29,7 @@ logger = logging.getLogger("scheduling")
 _CODE_MAP = {
     ERR_DUPLICATE_ID: "DUPLICATE_ID",
     ERR_TOO_MANY_WINDOWS: "TOO_MANY_WINDOWS",
+    ERR_TOO_MANY_ADVERTISERS: "TOO_MANY_ADVERTISERS",
     "start_end_order_error": "INVALID_INTERVAL",
     "missing": "MISSING_FIELD",
     "value_error": "INVALID_VALUE",
@@ -83,6 +90,8 @@ async def _on_validation_error(request: Request, exc: RequestValidationError):
             d["loc"] = ["windows"]
         if d["code"] == "TOO_MANY_WINDOWS" and not loc:
             d["loc"] = ["windows"]
+        if d["code"] == "TOO_MANY_ADVERTISERS" and not loc:
+            d["loc"] = ["windows"]
 
     status = 400 if any(d["code"] == "INVALID_JSON" for d in details) else 422
     return JSONResponse(
@@ -126,3 +135,23 @@ async def create_schedule(batch: Batch):
         None, solve, batch.limit, windows
     )
     return {"profit": profit, "ids": ids}
+
+
+@app.post("/api/v1/advertiser-schedules")
+async def create_advertiser_schedule(batch: AdvertiserBatch):
+    windows = [
+        (w.id, w.start, w.end, w.value, w.advertiser_id)
+        for w in batch.windows
+    ]
+    # 纯 CPU：排序 O(n log n) + DP O(n * limit * A)（n<=2000, limit<=20, A<=8），
+    # 放到线程池避免阻塞事件循环。
+    profit, selections = await asyncio.get_running_loop().run_in_executor(
+        None, solve_with_advertisers, batch.limit, windows
+    )
+    return {
+        "profit": profit,
+        "selections": [
+            {"id": wid, "advertiser_id": advertiser}
+            for wid, advertiser in selections
+        ],
+    }
