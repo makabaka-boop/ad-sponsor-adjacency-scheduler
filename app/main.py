@@ -14,7 +14,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .schemas import Batch, ERR_DUPLICATE_ID, ERR_TOO_MANY_WINDOWS
+from .advertiser_solver import solve_advertiser
+from .schemas import (
+    AdvertiserBatch,
+    Batch,
+    ERR_DUPLICATE_ID,
+    ERR_TOO_MANY_ADVERTISERS,
+    ERR_TOO_MANY_WINDOWS,
+)
 from .solver import solve
 
 logger = logging.getLogger("scheduling")
@@ -23,6 +30,7 @@ logger = logging.getLogger("scheduling")
 _CODE_MAP = {
     ERR_DUPLICATE_ID: "DUPLICATE_ID",
     ERR_TOO_MANY_WINDOWS: "TOO_MANY_WINDOWS",
+    ERR_TOO_MANY_ADVERTISERS: "TOO_MANY_ADVERTISERS",
     "start_end_order_error": "INVALID_INTERVAL",
     "missing": "MISSING_FIELD",
     "value_error": "INVALID_VALUE",
@@ -83,6 +91,8 @@ async def _on_validation_error(request: Request, exc: RequestValidationError):
             d["loc"] = ["windows"]
         if d["code"] == "TOO_MANY_WINDOWS" and not loc:
             d["loc"] = ["windows"]
+        if d["code"] == "TOO_MANY_ADVERTISERS" and not loc:
+            d["loc"] = ["windows"]
 
     status = 400 if any(d["code"] == "INVALID_JSON" for d in details) else 422
     return JSONResponse(
@@ -126,3 +136,21 @@ async def create_schedule(batch: Batch):
         None, solve, batch.limit, windows
     )
     return {"profit": profit, "ids": ids}
+
+
+@app.post("/api/v1/schedules/advertiser-constrained")
+async def create_advertiser_constrained_schedule(batch: AdvertiserBatch):
+    """带广告主约束的排期：相邻两条已选广告不得来自同一广告主。
+
+    请求沿用旧模式的窗口、报价与数量上限语义，另为每个窗口携带广告主
+    标识；规模上限独立（2000 窗口 / 8 广告主 / 最多选 20 条）。
+    响应在 ids 之外给出平行的广告主列表，二者均按窗口编号升序。
+    """
+    windows = [
+        (w.id, w.start, w.end, w.value, w.advertiser) for w in batch.windows
+    ]
+    # 状态规模 2000*20*9，远小于旧模式，但同为纯 CPU，仍放线程池。
+    profit, ids, advertisers = await asyncio.get_running_loop().run_in_executor(
+        None, solve_advertiser, batch.limit, windows
+    )
+    return {"profit": profit, "ids": ids, "advertisers": advertisers}

@@ -12,6 +12,8 @@
   5. 重复 id 整体拒绝（稳定错误码 DUPLICATE_ID）
   6. 越界字段拒绝（start >= end）
   7. 最大输入 20 万窗口，唯一最优 50 * 1e9，并可重算
+  8. 带广告主约束：直接求约束最优（非算完再删）、端点相接不误判重叠、
+     9 个不同广告主整批拒绝（TOO_MANY_ADVERTISERS）
 
 任一断言失败以非零码退出。
 """
@@ -156,6 +158,32 @@ def main():
         {"limit": 50, "windows": windows}, timeout=180,
     )
     check("optimum is reproducible", status2 == 200 and body2 == body, str(body2)[:300])
+
+    # 带广告主约束：无约束最优 a+b=20 含相邻同主，约束最优须直接求出 a+c=19
+    # （若先算旧最优再删连续同主只剩 10）；b、c 端点相接不得误判重叠。
+    status, body = request(
+        base_url, "POST", "/api/v1/schedules/advertiser-constrained",
+        {"limit": 2, "windows": [
+            {"id": "a", "start": 0, "end": 10, "value": 10, "advertiser": "X"},
+            {"id": "b", "start": 10, "end": 20, "value": 10, "advertiser": "X"},
+            {"id": "c", "start": 10, "end": 20, "value": 9, "advertiser": "Y"},
+        ]},
+    )
+    check("advertiser-constrained optimum (not filtered, touching ok)",
+          status == 200 and body == {"profit": 19, "ids": ["a", "c"],
+                                     "advertisers": ["X", "Y"]}, str(body))
+
+    # 9 个不同广告主：整批拒绝，稳定错误码 TOO_MANY_ADVERTISERS
+    status, body = request(
+        base_url, "POST", "/api/v1/schedules/advertiser-constrained",
+        {"limit": 2, "windows": [
+            {"id": f"w{j}", "start": j * 10, "end": j * 10 + 5, "value": 1,
+             "advertiser": f"adv{j}"} for j in range(9)
+        ]},
+    )
+    codes = [d["code"] for d in body.get("error", {}).get("details", [])]
+    check("9 distinct advertisers rejected with stable code",
+          status == 422 and "TOO_MANY_ADVERTISERS" in codes, str(body))
 
     print("\nALL VERIFY CHECKS PASSED")
 
